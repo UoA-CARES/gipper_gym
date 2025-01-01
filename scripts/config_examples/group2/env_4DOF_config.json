@@ -1,7 +1,7 @@
 {
     "domain": "two_finger",
     "task": "translation",
-    "elevator_device_name": "/dev/ttyUSB0",
+    "elevator_device_name": "/dev/ttyUSB1",
     "elevator_baudrate": 1000000,
     "elevator_servo_id": 10,
     "elevator_limits": [8000, 1500],

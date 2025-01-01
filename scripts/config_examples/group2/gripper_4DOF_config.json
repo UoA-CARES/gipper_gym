@@ -1,7 +1,7 @@
 {
     "gripper_type": 0,
     "gripper_id": 1,
-    "device_name": "/dev/ttyUSB1",
+    "device_name": "/dev/ttyUSB2",
     "baudrate": 1000000,
     "servo_type":  "XL-320",
     "action_type": "position",

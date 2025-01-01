@@ -1,23 +1,25 @@
 import logging
 import time
 from datetime import datetime
+import numpy as np
 
 import torch
 from rl_zoo.networks.mfrl.tqc.critic_tqc import TQC_Critic
 from rl_zoo.networks.mfrl.common.actor import Actor
 from rl_zoo.networks.mfrl.sac.critic_sac import SAC_Critic
-from rl_zoo.networks.world_models.ensembles import Ensemble_Dyna_One_Reward
-from rl_zoo.networks.world_models.deterministic import Single_PNN
-import numpy as np
-
+from rl_zoo.networks.world_models.ensembles import Ensemble_Dyna_Big
+from cares_reinforcement_learning.memory import MemoryBuffer
 from rl_zoo.agents.mfrl.sac import SAC
 from rl_zoo.agents.mfrl.tqc import TQC
-from rl_zoo.agents.mbrl import Dyna_SAC_NS
+
+from cares_reinforcement_learning.algorithm.mbrl import DynaSAC_NS, DynaSAC_Bounded
+from rl_zoo.agents.mbrl import Dyna_SAC_NS, Immerseive_Weighting_Dyna_SAC_NS, \
+    Dyna_SAC_NS_V2
 
 import tools.error_handlers as erh
 from cares_lib.dynamixel.Gripper import GripperError
 from cares_lib.dynamixel.gripper_configuration import GripperConfig
-from rl_zoo.utils import PrioritizedReplayBuffer
+
 from cares_reinforcement_learning.util import Record
 from cares_reinforcement_learning.util.configurations import (
     AlgorithmConfig,
@@ -57,13 +59,14 @@ class GripperTrainer:
         env_factory = EnvironmentFactory()
 
         # TODO add set_seed to environment
-        self.environment = env_factory.create_environment(env_config, gripper_config)
+        self.environment = env_factory.create_environment(env_config,
+                                                          gripper_config)
 
         logging.info("Resetting Environment")
         # will just crash right away if there is an issue but that is fine
         state = self.environment.reset()
         logging.info(f"State: {state}")
-        
+
         # This wont work for multi-dimension arrays - TODO push this to the environment
         observation_size = len(state)
         action_num = gripper_config.num_motors
@@ -74,6 +77,8 @@ class GripperTrainer:
         algo = alg_config.algorithm
         print(algo)
         actor = Actor(observation_size, action_num)
+
+
         self.memory = PrioritizedReplayBuffer()
 
         if algo == 'SAC':
@@ -94,22 +99,81 @@ class GripperTrainer:
                              actor_lr=3e-4, critic_lr=3e-4,
                              alpha_lr=0.001, device="cuda")
         if algo == 'DynaSAC':
-            self.world_model = Single_PNN(observation_size,
-                                                action_num,
-                                                device='cuda')
             critic = SAC_Critic(observation_size, action_num)
-            self.agent = Dyna_SAC_NS(actor_network=actor,
-                                     critic_network=critic,
-                                     world_network=self.world_model,
-                                     gamma=0.99,
-                                     tau=0.005,
-                                     action_num=action_num,
-                                     actor_lr=1e-3,
-                                     critic_lr=1e-3,
-                                     alpha_lr=0.001,
-                                     num_samples=40,
-                                     horizon=1,
-                                     device='cuda')
+
+            self.world_model = Ensemble_Dyna_Big(
+                observation_size=observation_size,
+                num_models=6,
+                num_actions=action_num,
+                device='cuda',
+                l_r=0.001,
+                prob_rwd=False,
+                boost_inter=30
+            )
+
+            self.agent = DynaSAC_Bounded(
+                actor_network=actor,
+                critic_network=critic,
+                world_network=self.world_model,
+                actor_lr = 1e-3,
+                critic_lr=1e-3,
+                alpha_lr=0.001,
+                gamma=0.99,
+                tau=0.005,
+                action_num=action_num,
+                horizon=1,
+                num_samples=10,
+                device='cuda',
+                train_both=False,
+                train_reward=False,
+                gripper=True,
+                threshold=0.1,
+                exploration_sample=5,
+            )
+
+            # self.agent = Dyna_SAC_NS(actor_network=actor,
+            #                          critic_network=critic,
+            #                          world_network=self.world_model,
+            #                          gamma=0.99,
+            #                          tau=0.005,
+            #                          action_num=action_num,
+            #                          actor_lr=1e-3,
+            #                          critic_lr=1e-3,
+            #                          alpha_lr=0.001,
+            #                          num_samples=15,
+            #                          horizon=2,
+            #                          device='cuda')
+
+            # if algo == "Immersive_Reweight_Dyna_SAC":
+            # self.agent = Immerseive_Weighting_Dyna_SAC_NS(actor_network=actor,
+            #                                               critic_network=critic,
+            #                                               world_network=self.world_model,
+            #                                               gamma=0.99,
+            #                                               tau=0.005,
+            #                                               action_num=action_num,
+            #                                               actor_lr=1e-3,
+            #                                               critic_lr=1e-3,
+            #                                               alpha_lr=0.001,
+            #                                               num_samples=15,
+            #                                               horizon=2,
+            #                                               device='cuda',
+            #                                               threshold=0.5,
+            #                                               train_reward=False,
+            #                                               train_both=False,
+            #                                               gripper=True)
+
+            # self.agent = Dyna_SAC_NS_V2(actor_network=actor,
+            #                             critic_network=critic,
+            #                             world_network=self.world_model,
+            #                             gamma=0.99,
+            #                             tau=0.005,
+            #                             action_num=action_num,
+            #                             actor_lr=1e-3,
+            #                             critic_lr=1e-3,
+            #                             alpha_lr=0.001,
+            #                             num_samples=10,
+            #                             horizon=2,
+            #                             device='cuda')
 
         ########################################################################
 
@@ -149,7 +213,7 @@ class GripperTrainer:
 
             logging.error(error_message)
             if erh.handle_gripper_error_home(
-                self.environment, error_message, self.file_path
+                    self.environment, error_message, self.file_path
             ):
                 # might keep looping if it keep having issues
                 return self.environment_reset()
@@ -173,13 +237,13 @@ class GripperTrainer:
         EnvironmentError: If there's an error related to the environment during the step.
         GripperError: If there's an error related to the gripper during the step.
         """
-        try:    
+        try:
             return self.environment.step(action_env)
         except (EnvironmentError, GripperError) as error:
             error_message = f"Failed to step environment with message: {error}"
             logging.error(error_message)
             if erh.handle_gripper_error_home(
-                self.environment, error_message, self.file_path
+                    self.environment, error_message, self.file_path
             ):
                 state = self.environment.reset()
                 # Truncated to True to skip the episode
@@ -209,7 +273,7 @@ class GripperTrainer:
         episode_num = 0
         success_counter = 0
         steps_to_success = 0
-        
+
         evaluate = False
 
         state = self.environment_reset()
@@ -238,8 +302,8 @@ class GripperTrainer:
             # Regardless if velocity or position based, train every step
             start_train_time = time.time()
             if (
-                total_step_counter >= max_steps_exploration
-                and total_step_counter % number_steps_per_train_policy == 0
+                    total_step_counter >= max_steps_exploration
+                    and total_step_counter % number_steps_per_train_policy == 0
             ):
                 if len(self.memory) == (batch_size + 1):
                     statistics = self.memory.get_statistics()
@@ -247,13 +311,13 @@ class GripperTrainer:
                 for _ in range(G):
                     self.agent.train_policy(self.memory, batch_size)
 
-                for _ in range(int(20)):
+                for _ in range(int(100)):
                     self.agent.train_world_model(memory=self.memory,
                                                  batch_size=batch_size)
 
             end_train_time = time.time()
             logging.debug(
-                f"Time to run training loop {end_train_time-start_train_time} \n"
+                f"Time to run training loop {end_train_time - start_train_time} \n"
             )
 
             if (total_step_counter + 1) % number_steps_per_evaluation == 0:
@@ -271,13 +335,14 @@ class GripperTrainer:
                     episode_steps=episode_timesteps,
                     episode_reward=episode_reward,
                     episode_time=episode_time,
-                    success_counter = success_counter,
-                    steps_to_success = steps_to_success,
+                    success_counter=success_counter,
+                    steps_to_success=steps_to_success,
                     display=self.env_config.display,
                 )
 
                 if evaluate & (total_step_counter > max_steps_exploration):
-                    logging.info("*************--Evaluation Loop--*************")
+                    logging.info(
+                        "*************--Evaluation Loop--*************")
                     self.evaluation_loop(total_step_counter)
                     evaluate = False
                     logging.info("--------------------------------------------")
@@ -298,7 +363,8 @@ class GripperTrainer:
 
         end_time = time.time()
         elapsed_time = end_time - start_time
-        print("Training time:", time.strftime("%H:%M:%S", time.gmtime(elapsed_time)))
+        print("Training time:",
+              time.strftime("%H:%M:%S", time.gmtime(elapsed_time)))
         if self.gripper_config.touch:
             self.environment.Touch.stop()
 
@@ -320,6 +386,13 @@ class GripperTrainer:
         state = self.environment_reset()
         frame = self.environment.grab_rendered_frame()
         self.record.start_video(total_steps + 1, frame, fps=1)
+
+        # save memory to see
+        experiences = []
+        for buffer in self.memory.memory_buffers:
+            # NOTE: we convert back to a standard list here
+            experiences.append(buffer[0: self.memory.current_size].tolist())
+
         for eval_episode_counter in range(number_eval_episodes):
             episode_timesteps = 0
             episode_reward = 0
@@ -338,15 +411,16 @@ class GripperTrainer:
 
                 if self.alg_config.algorithm == 'DynaSAC':
                     # Simple Evaluate the world model
-                    tensor_state = torch.FloatTensor(state).to('cuda').unsqueeze(
+                    tensor_state = torch.FloatTensor(state).to(
+                        'cuda').unsqueeze(
                         dim=0)
-                    tensor_action = torch.FloatTensor(action_env).to(
+                    tensor_action = torch.FloatTensor(action).to(
                         'cuda').unsqueeze(dim=0)
                     pred_next, _, _, _ = self.agent.world_model.pred_next_states(
                         tensor_state, tensor_action)
                     pred_next = pred_next.squeeze().detach().cpu().numpy()
-                    pred_next = np.concatenate((pred_next, next_state[-2:]))
-                    mse_loss = np.mean((pred_next - state) ** 2) ** 0.5
+                    pred_next[-2:] = state[-2:]
+                    mse_loss = np.mean((pred_next - next_state) ** 2) ** 0.5
                     model_errors += mse_loss
                     eval_steps += 1
 
